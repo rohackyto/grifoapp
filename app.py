@@ -50,7 +50,7 @@ def _snapshot_reciente() -> bool:
     if not (SNAPSHOT.exists() and META.exists()):
         return False
     generado = json.loads(META.read_text(encoding="utf-8")).get("generado")
-    return bool(generado) and (datetime.now() - datetime.fromisoformat(generado)).total_seconds() \
+    return bool(generado) and (logica.ahora() - datetime.fromisoformat(generado)).total_seconds() \
         < HORAS_REFRESCO * 3600
 
 
@@ -76,7 +76,7 @@ def cargar_estaciones() -> tuple[list[logica.Estacion], dict]:
             estaciones, meta = _leer_snapshot()
             meta["aviso"] = f"No se pudo actualizar ({e}); se muestra la última copia."
             return estaciones, meta
-        return logica.datos_demo(), {"corte": datetime.now(), "grifos": 0,
+        return logica.datos_demo(), {"corte": logica.ahora(), "grifos": 0,
                                      "aviso": f"Sin conexión a Osinergmin ({e}). DATOS DEMO."}
 
 
@@ -212,7 +212,7 @@ def titulo(e: logica.Estacion) -> str:
 def detalle_fecha(e: logica.Estacion) -> str:
     if not e.fecha:
         return ""
-    dias = (datetime.now() - e.fecha).days
+    dias = (logica.ahora() - e.fecha).days
     return "precio de hoy" if dias == 0 else f"precio de hace {dias} día{'s' if dias > 1 else ''}"
 
 

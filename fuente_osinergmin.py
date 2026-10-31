@@ -74,7 +74,7 @@ def _sin_tildes(texto: str) -> str:
 
 # ---------- 1. Precios ----------
 def descargar_precios(anio: int | None = None) -> pd.DataFrame:
-    anio = anio or datetime.now().year
+    anio = anio or logica.ahora().year
     contenido = _descargar(URL_PRECIOS.format(anio=anio))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # el Excel no trae estilo por defecto
@@ -232,7 +232,7 @@ def construir(con_osm: bool = True) -> tuple[list[logica.Estacion], dict]:
             fecha=fila.fecha.to_pydatetime() if pd.notna(fila.fecha) else None,
         ))
     meta = {
-        "generado": datetime.now(),
+        "generado": logica.ahora(),
         "corte": precios["fecha"].max().to_pydatetime(),
         "grifos": precios["CODIGO_OSINERG"].nunique(),
         "con_coordenada": int(df.drop_duplicates("CODIGO_OSINERG")["LATITUD"].notna().sum()),

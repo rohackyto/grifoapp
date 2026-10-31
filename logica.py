@@ -7,9 +7,18 @@ import math
 import random
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-COSTO_POR_KM = 0.65      # S/ que cuesta recorrer 1 km (combustible + desgaste aprox.)
+HORA_PERU = timezone(timedelta(hours=-5))  # Perú no usa horario de verano
+
+
+def ahora() -> datetime:
+    """Hora de Perú sin zona, comparable con las fechas de Osinergmin.
+    Los servidores (p. ej. Streamlit Cloud) suelen estar en UTC."""
+    return datetime.now(HORA_PERU).replace(tzinfo=None)
+
+
+COSTO_POR_KM = 0.65     # S/ que cuesta recorrer 1 km (combustible + desgaste aprox.)
 GALONES_TANQUE = 14      # tamaño de tanque usado para repartir el costo del viaje
 
 # Nombres de columna aceptados -> nombre interno. Permite usar el CSV de
@@ -150,7 +159,7 @@ def ranking(
     hoy: datetime | None = None,
 ) -> list[Resultado]:
     """Ordena por lo que realmente cuesta cargar: precio con descuento + viaje."""
-    hoy = hoy or datetime.now()
+    hoy = hoy or ahora()
     resultados = []
     for e in estaciones:
         if e.producto != producto:
