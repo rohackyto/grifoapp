@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from streamlit_js_eval import get_geolocation, streamlit_js_eval
+from streamlit_js_eval import streamlit_js_eval
 
 import fuente_osinergmin
 import geocodificar
 import logica
+import vista
 
 st.set_page_config(page_title="GrifoApp", page_icon="⛽", layout="centered")
 
@@ -23,16 +24,18 @@ ORIGEN_POR_DEFECTO = ("Plaza San Martín, Lima", -12.0517, -77.0347)
 ORDEN_PRODUCTOS = ["REGULAR", "PREMIUM", "DIESEL", "GLP"]
 MARCAS_DESCUENTO = ["Primax", "Repsol", "Pecsa", "Petroperú"]
 CLAVE_LS = "grifoapp"
+# Pide la ubicación al navegador y se rinde a los 20 s: si el usuario ignora el aviso de
+# permiso, getCurrentPosition puede no responder nunca (su "timeout" no cuenta esa espera).
+JS_UBICACION = """new Promise(responder => {
+  if (!navigator.geolocation) { responder({error: {code: 0}}); return; }
+  const limite = setTimeout(() => responder({error: {code: 3}}), 20000);
+  navigator.geolocation.getCurrentPosition(
+    p => { clearTimeout(limite); responder({coords: {latitude: p.coords.latitude, longitude: p.coords.longitude}}); },
+    e => { clearTimeout(limite); responder({error: {code: e.code}}); },
+    {enableHighAccuracy: false, timeout: 15000, maximumAge: 300000});
+})"""
 
-st.markdown("""
-<style>
-.precio-grande {font-size: 4.5rem; font-weight: 800; color: #F2A93B; line-height: 1;}
-.precio-tachado {text-decoration: line-through; opacity: .6; margin-left: .5rem;}
-.etiqueta {font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; opacity: .7;}
-.tarjeta {border-top: 3px solid #F2A93B; padding: .8rem 1rem; background: #15191d;}
-iframe[title="streamlit_js_eval.streamlit_js_eval"] {display: none;}
-</style>
-""", unsafe_allow_html=True)
+st.html(f"<style>{(CARPETA / 'estilos.css').read_text(encoding='utf-8')}{vista.CSS_ICONOS}</style>")
 
 
 # ---------- Datos ----------
@@ -94,9 +97,6 @@ def nombre_de_lugar(lat: float, lon: float) -> str:
 
 
 estaciones, meta = cargar_estaciones()
-if meta.get("aviso"):
-    st.warning(meta["aviso"])
-
 productos = [p for p in ORDEN_PRODUCTOS if any(e.producto == p for e in estaciones)]
 marcas = [m for m in MARCAS_DESCUENTO if any(e.marca == m for e in estaciones)] or \
     sorted({e.marca for e in estaciones})
@@ -106,7 +106,6 @@ if "prefs" not in st.session_state:
     crudo = streamlit_js_eval(js_expressions=f"localStorage.getItem('{CLAVE_LS}') || '{{}}'",
                               key="leer_prefs")
     if crudo is None:  # el componente aún no responde: esperamos al siguiente ciclo
-        st.caption("Cargando tus preferencias…")
         st.stop()
     try:
         prefs = json.loads(crudo)
@@ -114,6 +113,8 @@ if "prefs" not in st.session_state:
         prefs = {}
     st.session_state.prefs = prefs
     st.session_state.origen = tuple(prefs.get("origen") or ORIGEN_POR_DEFECTO)
+    # Primera visita (sin ubicación guardada): pedimos la del navegador, como GasolinApp
+    st.session_state.pedir_gps = not prefs.get("origen")
     for m in marcas:
         st.session_state[f"desc_{m}"] = float(prefs.get("descuentos", {}).get(m, 0.0))
 
@@ -129,25 +130,37 @@ def guardar_prefs() -> None:
 
 
 # ---------- Cabecera ----------
-col_logo, col_corte, col_cfg = st.columns([3, 2, 1], vertical_alignment="center")
-col_logo.markdown("## ⛽ GRIFOAPP")
-col_corte.caption(f"OSINERGMIN {meta['corte']:%d/%m · %H:%M}")
-with col_cfg.popover("⚙️", help="Mis descuentos"):
-    st.markdown('<div class="etiqueta">Mis descuentos</div>', unsafe_allow_html=True)
-    st.caption("Lo que te descuenta cada marca por galón. Déjalo en 0 si no lo tienes y desaparece "
-               "de los filtros. Queda guardado en este navegador.")
-    for m in marcas:
-        st.number_input(m, min_value=0.0, max_value=5.0, step=0.10, format="%.2f", key=f"desc_{m}")
+with st.container(key="cabecera"):
+    c_logo, c_corte, c_cfg = st.columns([5, 4, 1.6])
+    c_logo.html(vista.cabecera_logo())
+    c_corte.html(vista.cabecera_corte(meta["corte"]))
+    with c_cfg.popover(":material/tune:", help="Mis descuentos y ajustes", use_container_width=True):
+        st.html('<div class="g-label">Mis descuentos</div>')
+        st.caption("Lo que te descuenta cada marca por galón. Déjalo en 0 si no lo tienes y "
+                   "desaparece de los filtros. Queda guardado en este navegador.")
+        for m in marcas:
+            st.number_input(m, min_value=0.0, max_value=5.0, step=0.10, format="%.2f", key=f"desc_{m}")
+        st.html('<div class="g-label" style="margin-top:.6rem">Ajustes</div>')
+        st.toggle("Ocultar precios con más de 30 días sin actualizar", value=True, key="recientes")
 descuentos = {m: st.session_state[f"desc_{m}"] for m in marcas}
+if meta.get("aviso"):
+    st.html(vista.aviso("Aviso", meta["aviso"]))
 
 # ---------- Ubicación ----------
 nombre_origen, lat0, lon0 = st.session_state.origen
-c_ubic, c_gps = st.columns([5, 1], vertical_alignment="center")
-c_ubic.markdown(f"📍 **{nombre_origen}**")
-if c_gps.button("📡", help="Usar mi ubicación actual"):
-    st.session_state.pedir_gps = True
+with st.container(key="ubicacion"):
+    c_ubic, c_gps = st.columns([8, 1.3])
+    buscando = st.session_state.get("pedir_gps")
+    c_ubic.html(vista.ubicacion(nombre_origen, "Buscando tu ubicación…" if buscando else ""))
+    if c_gps.button(":material/my_location:", help="Usar mi ubicación actual", use_container_width=True):
+        st.session_state.pedir_gps = True
+        st.session_state.gps_error = False
+        st.session_state.gps_intento = st.session_state.get("gps_intento", 0) + 1
+        st.rerun()
 if st.session_state.get("pedir_gps"):
-    pos = get_geolocation()
+    # una clave nueva por intento, para que el botón vuelva a preguntar al navegador
+    pos = streamlit_js_eval(js_expressions=JS_UBICACION,
+                            key=f"gps_{st.session_state.get('gps_intento', 0)}")
     if pos and "coords" in pos:
         st.session_state.pedir_gps = False
         la, lo = pos["coords"]["latitude"], pos["coords"]["longitude"]
@@ -155,7 +168,12 @@ if st.session_state.get("pedir_gps"):
         st.rerun()
     elif pos and "error" in pos:
         st.session_state.pedir_gps = False
-        st.warning("El navegador no compartió la ubicación. Escribe una dirección.")
+        st.session_state.gps_error = True
+        st.rerun()
+if st.session_state.get("gps_error"):
+    st.html(vista.aviso("No pudimos usar tu ubicación",
+                        "Permite Ubicación en el candado de la barra de direcciones y toca el botón "
+                        "de ubicación, o escribe tu dirección abajo."))
 
 
 def buscar_direccion() -> None:
@@ -165,11 +183,13 @@ def buscar_direccion() -> None:
     try:
         encontrado = buscar_lugar(texto)
     except Exception as e:
-        st.session_state.error_busqueda = f"Error del geocodificador: {e}"
+        st.session_state.error_busqueda = f"Error del buscador de direcciones: {e}"
         return
     if encontrado:
         st.session_state.origen = encontrado
         st.session_state.error_busqueda = None
+        st.session_state.pedir_gps = False
+        st.session_state.gps_error = False
     else:
         st.session_state.error_busqueda = "No encontré esa dirección. Prueba 'Av. X con Av. Y, distrito'."
     st.session_state.busqueda = ""
@@ -178,91 +198,36 @@ def buscar_direccion() -> None:
 st.text_input("Cambiar ubicación", key="busqueda", on_change=buscar_direccion,
               placeholder="Cambiar: escribe una dirección o un cruce", label_visibility="collapsed")
 if st.session_state.get("error_busqueda"):
-    st.warning(st.session_state.error_busqueda)
+    st.html(vista.aviso("Dirección no encontrada", st.session_state.error_busqueda))
 
 # ---------- Filtros ----------
-c1, c2 = st.columns([1.2, 1])
-producto = c1.segmented_control("Combustible", productos, default=productos[0], key="producto",
+producto = st.segmented_control("Combustible", productos, default=productos[0], key="producto",
                                 label_visibility="collapsed") or productos[0]
-radio = c2.segmented_control("Radio", [5, 10, 20], default=5, format_func=lambda k: f"{k} KM",
+radio = st.segmented_control("Radio", [5, 10, 20], default=5, format_func=lambda k: f"{k} KM",
                              key="radio", label_visibility="collapsed") or 5
-
 con_descuento = [m for m, d in descuentos.items() if d > 0]
 filtro = set()
 if con_descuento:
-    filtro = set(st.pills("Solo marcas", con_descuento, selection_mode="multi",
-                          format_func=lambda m: f"{m.upper()} −S/ {descuentos[m]:.2f}",
-                          label_visibility="collapsed") or [])
-solo_recientes = st.toggle("Ocultar precios con más de 30 días sin actualizar", value=True)
+    with st.container(key="marcas"):
+        filtro = set(st.pills("Solo marcas", con_descuento, selection_mode="multi",
+                              format_func=lambda m: f"{m.upper()} −S/ {descuentos[m]:.2f}",
+                              label_visibility="collapsed") or [])
 
 guardar_prefs()
 resultados = logica.ranking(estaciones, (lat0, lon0), producto, radio, descuentos, filtro,
-                            max_dias=30 if solo_recientes else None)
+                            max_dias=30 if st.session_state.get("recientes", True) else None)
 
 if not resultados:
-    st.info("No hay grifos con esos filtros. Aumenta el radio o quita filtros.")
+    st.html(vista.aviso("Sin resultados", "No hay grifos con esos filtros. Aumenta el radio o quita filtros."))
     st.stop()
 
-
-def titulo(e: logica.Estacion) -> str:
-    """'Repsol Lince' si conocemos la marca; si no, la razón social."""
-    return f"{e.marca} {e.distrito}" if e.marca != "Otra" else e.nombre.strip()
-
-
-def detalle_fecha(e: logica.Estacion) -> str:
-    if not e.fecha:
-        return ""
-    dias = (logica.ahora() - e.fecha).days
-    return "precio de hoy" if dias == 0 else f"precio de hace {dias} día{'s' if dias > 1 else ''}"
-
-
-# ---------- Mejor opción ----------
-mejor = resultados[0]
-e = mejor.estacion
-st.divider()
-st.markdown('<div class="etiqueta">Mejor opción cerca de ti</div>', unsafe_allow_html=True)
-st.markdown(f"### {titulo(e)}")
-st.caption(" · ".join(x for x in [e.nombre if e.marca != "Otra" else e.distrito,
-                                  f"{mejor.distancia_km:.1f} km",
-                                  "ubic. aprox." if e.ubicacion_aprox else "", detalle_fecha(e)] if x))
-tachado = f'<span class="precio-tachado">S/ {e.precio:.2f}</span>' if mejor.descuento else ""
-etiqueta_desc = f' · {e.marca.upper()} −S/ {mejor.descuento:.2f}' if mejor.descuento else ""
-st.markdown(f'<div class="tarjeta"><div class="etiqueta">Galón{etiqueta_desc}</div>'
-            f'<span class="precio-grande">S/ {mejor.precio_final:.2f}</span>{tachado}</div>',
-            unsafe_allow_html=True)
-m1, m2, m3 = st.columns(3)
-m1.metric("Distancia", f"{mejor.distancia_km:.1f} km")
-m2.metric("Llegar cuesta", f"S/ {mejor.costo_llegar:.2f}")
-m3.metric("Ahorro/tanque", f"S/ {logica.ahorro_por_tanque(resultados):.2f}",
-          help="Frente al precio promedio de la zona, ya restado el costo de llegar.")
-b1, b2 = st.columns(2)
-b1.link_button("🗺️ Google Maps", logica.enlace_google_maps(e.lat, e.lon), use_container_width=True)
-b2.link_button("🧭 Waze", logica.enlace_waze(e.lat, e.lon), use_container_width=True)
-
-# ---------- Top 10 ----------
-st.markdown('<div class="etiqueta">Top 10 cerca de ti</div>', unsafe_allow_html=True)
-st.caption(f"Orden por precio + lo que cuesta llegar (≈ S/ {logica.COSTO_POR_KM} por km).")
-for i, r in enumerate(resultados[1:10], start=2):
-    s = r.estacion
-    extra = f" · {s.marca} −S/ {r.descuento:.2f}" if r.descuento else (" · ubic. aprox." if s.ubicacion_aprox else "")
-    with st.expander(f"{i}. **{titulo(s)}** — {r.distancia_km:.1f} km{extra} — **S/ {r.precio_final:.2f}**"):
-        st.write(f"{s.nombre.strip()} · {s.direccion} · {s.distrito}")
-        st.write(f"Llegar cuesta **S/ {r.costo_llegar:.2f}** ({r.distancia_km:.1f} km) · equivale a "
-                 f"**S/ {r.precio_efectivo:.2f}** el galón · {detalle_fecha(s)}")
-        k1, k2 = st.columns(2)
-        k1.link_button("Google Maps", logica.enlace_google_maps(s.lat, s.lon), use_container_width=True)
-        k2.link_button("Waze", logica.enlace_waze(s.lat, s.lon), use_container_width=True)
+# ---------- Resultados ----------
+st.html(vista.tarjeta_principal(resultados[0], logica.ahorro_por_tanque(resultados)))
+st.html(vista.top10(resultados))
 
 with st.expander(f"Ver los {min(10, len(resultados))} grifos en el mapa"):
     puntos = [{"lat": r.estacion.lat, "lon": r.estacion.lon, "color": "#F2A93B"} for r in resultados[:10]]
     puntos.append({"lat": lat0, "lon": lon0, "color": "#4DA3FF"})
     st.map(pd.DataFrame(puntos), color="color", size=40)
 
-st.info(f"**Cómo ordenamos:** por lo que te cuesta cargar de verdad: el precio con tu descuento más "
-        f"el viaje, unos S/ {logica.COSTO_POR_KM} por km repartidos en un tanque de "
-        f"{logica.GALONES_TANQUE} galones. Por eso un grifo barato pero lejos puede quedar debajo de "
-        "otro un poco más caro y cerca.")
-st.caption(f"Datos de Osinergmin (EVPC) del {meta['corte']:%d/%m/%Y · %H:%M} · "
-           f"{meta.get('grifos', 0):,} grifos. Coordenadas: capa pública de Osinergmin; las estaciones "
-           "sin coordenada se ubican en el centro de su distrito. Marcas: OpenStreetMap y razón social. "
-           "Precios referenciales reportados por cada grifo.")
+st.html(vista.pie(meta))
